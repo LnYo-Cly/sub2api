@@ -242,8 +242,37 @@ func (s *TokenRefreshService) listActiveAccounts(ctx context.Context) ([]Account
 	return s.accountRepo.ListActive(ctx)
 }
 
+// RefreshAccountNow refreshes one OAuth account immediately. It is intended for
+// health remediation after an upstream failure, so it bypasses expiry-window
+// checks and forces a refresh under the same locking path used by token
+// providers and the background refresh loop.
+func (s *TokenRefreshService) RefreshAccountNow(ctx context.Context, account *Account) error {
+	if s == nil || account == nil {
+		return nil
+	}
+	if !account.IsOAuth() {
+		return nil
+	}
+	if s.cfg == nil {
+		return fmt.Errorf("token refresh config is not available")
+	}
+
+	refreshWindow := time.Duration(s.cfg.RefreshBeforeExpiryHours * float64(time.Hour))
+	for idx, refresher := range s.refreshers {
+		if refresher == nil || !refresher.CanRefresh(account) {
+			continue
+		}
+		var executor OAuthRefreshExecutor
+		if idx < len(s.executors) {
+			executor = s.executors[idx]
+		}
+		return s.refreshWithRetry(ctx, account, refresher, executor, refreshWindow, WithOAuthRefreshForce())
+	}
+	return fmt.Errorf("no token refresher registered for platform=%s type=%s", account.Platform, account.Type)
+}
+
 // refreshWithRetry 带重试的刷新
-func (s *TokenRefreshService) refreshWithRetry(ctx context.Context, account *Account, refresher TokenRefresher, executor OAuthRefreshExecutor, refreshWindow time.Duration) error {
+func (s *TokenRefreshService) refreshWithRetry(ctx context.Context, account *Account, refresher TokenRefresher, executor OAuthRefreshExecutor, refreshWindow time.Duration, options ...OAuthRefreshOption) error {
 	var lastErr error
 
 	for attempt := 1; attempt <= s.cfg.MaxRetries; attempt++ {
@@ -252,7 +281,7 @@ func (s *TokenRefreshService) refreshWithRetry(ctx context.Context, account *Acc
 
 		// 优先使用统一 API（带分布式锁 + DB 重读保护）
 		if s.refreshAPI != nil && executor != nil {
-			result, refreshErr := s.refreshAPI.RefreshIfNeeded(ctx, account, executor, refreshWindow)
+			result, refreshErr := s.refreshAPI.RefreshIfNeeded(ctx, account, executor, refreshWindow, options...)
 			if refreshErr != nil {
 				err = refreshErr
 			} else if result.LockHeld {

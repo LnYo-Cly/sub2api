@@ -70,6 +70,22 @@ func ProvideTokenRefreshService(
 	return svc
 }
 
+// ProvideAccountHealthRemediationService wires gateway services after
+// construction to avoid a constructor dependency cycle.
+func ProvideAccountHealthRemediationService(
+	accountRepo AccountRepository,
+	tokenRefreshService *TokenRefreshService,
+	accountTestService *AccountTestService,
+	rateLimitService *RateLimitService,
+	gatewayService *GatewayService,
+	openAIGatewayService *OpenAIGatewayService,
+) *AccountHealthRemediationService {
+	svc := NewAccountHealthRemediationService(accountRepo, tokenRefreshService, accountTestService, rateLimitService)
+	gatewayService.SetAccountHealthRemediationService(svc)
+	openAIGatewayService.SetAccountHealthRemediationService(svc)
+	return svc
+}
+
 // ProvideClaudeTokenProvider creates ClaudeTokenProvider with OAuthRefreshAPI injection
 func ProvideClaudeTokenProvider(
 	accountRepo AccountRepository,
@@ -481,6 +497,7 @@ var ProviderSet = wire.NewSet(
 	NewCRSSyncService,
 	ProvideUpdateService,
 	ProvideTokenRefreshService,
+	ProvideAccountHealthRemediationService,
 	ProvideAccountExpiryService,
 	ProvideSubscriptionExpiryService,
 	ProvideTimingWheelService,

@@ -29,6 +29,21 @@ type OAuthRefreshResult struct {
 	LockHeld       bool           // 锁被其他 worker 持有（未执行刷新）
 }
 
+type oauthRefreshOptions struct {
+	force bool
+}
+
+type OAuthRefreshOption func(*oauthRefreshOptions)
+
+// WithOAuthRefreshForce forces token refresh even when token metadata says it is
+// not close to expiry. This is used by account health remediation after an
+// upstream auth or 5xx failure.
+func WithOAuthRefreshForce() OAuthRefreshOption {
+	return func(options *oauthRefreshOptions) {
+		options.force = true
+	}
+}
+
 // OAuthRefreshAPI 统一的 OAuth Token 刷新入口
 // 封装分布式锁、进程内互斥锁、DB 重读、已刷新检查、竞争恢复等通用逻辑
 type OAuthRefreshAPI struct {
@@ -77,7 +92,15 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	account *Account,
 	executor OAuthRefreshExecutor,
 	refreshWindow time.Duration,
+	options ...OAuthRefreshOption,
 ) (*OAuthRefreshResult, error) {
+	refreshOptions := oauthRefreshOptions{}
+	for _, apply := range options {
+		if apply != nil {
+			apply(&refreshOptions)
+		}
+	}
+
 	cacheKey := executor.CacheKey(account)
 
 	// 0. 获取进程内互斥锁（防止同一进程内的并发刷新竞争）
@@ -119,7 +142,7 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	}
 
 	// 3. 二次检查是否仍需刷新（另一条路径可能已刷新）
-	if !executor.NeedsRefresh(freshAccount, refreshWindow) {
+	if !refreshOptions.force && !executor.NeedsRefresh(freshAccount, refreshWindow) {
 		return &OAuthRefreshResult{
 			Account: freshAccount,
 		}, nil

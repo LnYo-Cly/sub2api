@@ -570,6 +570,7 @@ type GatewayService struct {
 	debugGatewayBodyFile  atomic.Pointer[os.File] // non-nil when SUB2API_DEBUG_GATEWAY_BODY is set
 	tlsFPProfileService   *TLSFingerprintProfileService
 	balanceNotifyService  *BalanceNotifyService
+	healthRemediation     *AccountHealthRemediationService
 }
 
 // NewGatewayService creates a new GatewayService
@@ -3820,6 +3821,24 @@ func (s *GatewayService) shouldFailoverUpstreamError(statusCode int) bool {
 	}
 }
 
+func (s *GatewayService) SetAccountHealthRemediationService(healthRemediation *AccountHealthRemediationService) {
+	if s == nil {
+		return
+	}
+	s.healthRemediation = healthRemediation
+}
+
+func (s *GatewayService) triggerAccountHealthRemediation(ctx context.Context, account *Account, statusCode int, reason string, body []byte) {
+	if s == nil || s.healthRemediation == nil || account == nil {
+		return
+	}
+	s.healthRemediation.Trigger(ctx, account, AccountHealthTrigger{
+		StatusCode: statusCode,
+		Reason:     reason,
+		Body:       body,
+	})
+}
+
 func retryBackoffDelay(attempt int) time.Duration {
 	// attempt 从 1 开始，表示第 attempt 次请求刚失败，需要等待后进行第 attempt+1 次请求。
 	if attempt <= 0 {
@@ -4531,6 +4550,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				Kind:               "request_error",
 				Message:            safeErr,
 			})
+			s.triggerAccountHealthRemediation(ctx, account, 0, safeErr, nil)
 			c.JSON(http.StatusBadGateway, gin.H{
 				"type": "error",
 				"error": gin.H{
@@ -4774,6 +4794,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		break
 	}
 	if resp == nil || resp.Body == nil {
+		s.triggerAccountHealthRemediation(ctx, account, 0, "empty upstream response", nil)
 		return nil, errors.New("upstream request failed: empty response")
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -7003,11 +7024,13 @@ func (s *GatewayService) handleRetryExhaustedSideEffects(ctx context.Context, re
 		// API Key 未配置错误码：不标记账号状态
 		logger.LegacyPrintf("service.gateway", "Account %d: upstream error %d after %d retries (not marking account)", account.ID, statusCode, maxRetryAttempts)
 	}
+	s.triggerAccountHealthRemediation(ctx, account, statusCode, extractUpstreamErrorMessage(body), body)
 }
 
 func (s *GatewayService) handleFailoverSideEffects(ctx context.Context, resp *http.Response, account *Account) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, body)
+	s.triggerAccountHealthRemediation(ctx, account, resp.StatusCode, extractUpstreamErrorMessage(body), body)
 }
 
 // handleRetryExhaustedError 处理重试耗尽后的错误
@@ -8868,6 +8891,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	if err != nil {
 		setOpsUpstreamError(c, 0, sanitizeUpstreamErrorMessage(err.Error()), "")
 		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Request failed")
+		s.triggerAccountHealthRemediation(ctx, account, 0, err.Error(), nil)
 		return fmt.Errorf("upstream request failed: %w", err)
 	}
 
@@ -8991,6 +9015,7 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 			Message:            sanitizeUpstreamErrorMessage(err.Error()),
 		})
 		s.countTokensError(c, http.StatusBadGateway, "upstream_error", "Request failed")
+		s.triggerAccountHealthRemediation(ctx, account, 0, err.Error(), nil)
 		return fmt.Errorf("upstream request failed: %w", err)
 	}
 

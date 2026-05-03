@@ -227,6 +227,13 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			if s.rateLimitService != nil {
 				s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 			}
+			if s.healthRemediation != nil {
+				s.healthRemediation.Trigger(ctx, account, AccountHealthTrigger{
+					StatusCode: resp.StatusCode,
+					Reason:     upstreamMsg,
+					Body:       respBody,
+				})
+			}
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,

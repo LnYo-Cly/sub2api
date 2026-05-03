@@ -168,6 +168,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 			if s.rateLimitService != nil {
 				s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 			}
+			s.triggerAccountHealthRemediation(ctx, account, resp.StatusCode, upstreamMsg, respBody)
 			return nil, &UpstreamFailoverError{
 				StatusCode:   resp.StatusCode,
 				ResponseBody: respBody,

@@ -335,6 +335,7 @@ type OpenAIGatewayService struct {
 	channelService        *ChannelService
 	balanceNotifyService  *BalanceNotifyService
 	settingService        *SettingService
+	healthRemediation     *AccountHealthRemediationService
 
 	openaiWSPoolOnce              sync.Once
 	openaiWSStateStoreOnce        sync.Once
@@ -1967,9 +1968,23 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(statusCode i
 	return isOpenAITransientProcessingError(statusCode, upstreamMsg, upstreamBody)
 }
 
+func (s *OpenAIGatewayService) SetAccountHealthRemediationService(healthRemediation *AccountHealthRemediationService) {
+	if s == nil {
+		return
+	}
+	s.healthRemediation = healthRemediation
+}
+
 func (s *OpenAIGatewayService) handleFailoverSideEffects(ctx context.Context, resp *http.Response, account *Account) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, body)
+	if s.healthRemediation != nil {
+		s.healthRemediation.Trigger(ctx, account, AccountHealthTrigger{
+			StatusCode: resp.StatusCode,
+			Reason:     extractUpstreamErrorMessage(body),
+			Body:       body,
+		})
+	}
 }
 
 // Forward forwards request to OpenAI API
@@ -2636,6 +2651,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					"message": "Upstream request failed",
 				},
 			})
+			if s.healthRemediation != nil {
+				s.healthRemediation.Trigger(ctx, account, AccountHealthTrigger{
+					StatusCode: 0,
+					Reason:     safeErr,
+				})
+			}
 			return nil, fmt.Errorf("upstream request failed: %s", safeErr)
 		}
 
